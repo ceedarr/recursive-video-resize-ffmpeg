@@ -62,7 +62,7 @@ class VideoResize:
             "min_size": (1, 1),            # リサイズ後の最小サイズ（幅, 高さ）
             "fps": 60,                   # fpsの上限
             "bitrate": 4500000,            # ビットレートの上限（bps）
-            "nochange_copy": False         # 変換不要の場合、ファイルをコピーするか（True）否か（False）
+            "nochange_copy": True         # 変換不要の場合、ファイルをコピーするか（True）否か（False）
         }
 
         # コマンドライン引数による上書き（例：--input, --output, --mode, --min_size, --fps, --bitrate, --nochange_copy 等）
