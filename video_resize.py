@@ -517,7 +517,6 @@ class VideoResize:
                 # ffmpegコマンドの組み立て
                 command = command_prefix + [
                     "ffmpeg",
-                    "-y",  # 上書き確認なし
                     "-i", str(path),
                     "-b:v", f"{bit_rate/1000}k",
                     "-c:v", "h264",
