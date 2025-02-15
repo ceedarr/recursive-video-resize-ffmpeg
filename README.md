@@ -58,13 +58,15 @@ python video_resize.py -i "C:\videos\video.mp4" -o "C:\resizedVideos" -m fullhd 
 >または、`video_resize.py`の`VideoResize.get_videos()`メソッド冒頭の`self.normalize_paths()`をコメントアウトして正規化を無効化してください。
 
 ### 2. リサイズの実行
-`subprocess`ライブラリでffmpegを実行します。下記コマンドが実行されます。
+`subprocess`ライブラリでffmpegを実行します。Windowsの場合、下記コマンドが実行されます。
 ```
 start /LOW /MIN ffmpeg -i "動画ファイル" -b:v "ビットレート" -c:v h264 -c:a copy -r fps -s 横ピクセルx縦ピクセル "出力先"
 ```
 `start /LOW /MIN ffmpeg`: 新規で最小化ウィンドウを開き、低優先度でffmpegを実行する\
 `-c:v h264`: ビデオコーデックをH.264に指定\
 `-c:a copy`: オーディオコーデックをコピー（変換せず）に指定
+
+Windowsではない場合、`start /LOW /MIN`は省かれます。
 
 ### 3. リサイズ後ファイル (or コピーファイル) の保存
 下記のように格納されている動画ファイル (mp4, mov) を`input="./"`, `output="./output"`で再帰的にリサイズする場合、
