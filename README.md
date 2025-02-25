@@ -35,15 +35,15 @@ Python環境がない場合、[公式サイト](https://www.python.org/downloads
 
 ## 使い方
 【`./videos`内の動画をリサイズし`./output`へ出力する場合】\
-コマンドライン (cmdで実行確認済) で下記のように実行します。
+コマンドライン (cmdで実行確認済) で下記のように実行します。相対パスを用いる場合、カレントディレクトリはvideo_resize.pyの親フォルダになります。
 ```
-python video_resize.py --input "./videos" --output "./output" --recursive true --mode custom 2560 1440 --limit_direction xy --min_size 1 1 --fps 60 --bitrate 4500000 --nochange_copy true
+python video_resize.py --input "./videos" --output "./output" --recursive true --mode custom 2560 1440 --limit_direction xy --min_size 1 1 --fps 60 --bpp 0.036 --nochange_copy true
 ```
 
 【`C:\videos\video.mp4`をリサイズし`C:\resizedVideos`へ出力する場合】\
 なお、オプションは短縮表記可能です。また、オプションを省略した場合、次節の表に示すデフォルト値で実行されます。
 ```
-python video_resize.py -i "C:\videos\video.mp4" -o "C:\resizedVideos" -m fullhd -f 60 -b 4500000
+python video_resize.py -i "C:\videos\video.mp4" -o "C:\resizedVideos" -m fullhd -f 60 -b 0.036
 ```
 
 ## オプション
@@ -60,7 +60,7 @@ python video_resize.py -i "C:\videos\video.mp4" -o "C:\resizedVideos" -m fullhd 
 | --limit_direction | -l  | リサイズ時にピクセルサイズを制限する方向 ("x", "y", "xy")                   | y          | xy      |
 | --min_size        | -s  | リサイズ後の最小サイズ (幅, 高さ)                                          | 750 1000   | 1 1     |
 | --fps             | -f  | fpsの上限                                                                | 30         | 60      |
-| --bitrate         | -b  | ビットレートの上限 (bps)                                                  | 3000000    | 4500000 |
+| --bpp             | -b  | １ピクセル当たりのビット数 (bits per pixel) の上限                         | 0.06       | 0.036   |
 | --nochange_copy   | -nc | 変換不要の場合、出力ディレクトリにファイルをコピーするか ("true", "false")   |  true      | true    |
 
 ## プログラム処理フロー
@@ -71,7 +71,27 @@ python video_resize.py -i "C:\videos\video.mp4" -o "C:\resizedVideos" -m fullhd 
 >この処理により元のファイル名が完全に変更されるので、ファイル名を維持したい場合は事前に対策を講じてください。\
 >または、`video_resize.py`の`VideoResize.get_videos()`メソッド冒頭の`self.normalize_paths()`をコメントアウトして正規化を無効化してください。
 
-### 2. リサイズの実行
+### 2. 各種パラメータの計算
+入力されたオプションに従い、リサイズの解像度、ビットレート、fpsを計算します。\
+計算の結果、リサイズ前後で全てのパラメータが同一となった場合、次のフローにおいてリサイズ処理を行わない仕様としています。このとき、`--nochange_copy`オプションが`true`であれば、このようなファイルは出力先フォルダへコピーされます。
+
+#### 解像度
+- `--mode`で指定されたサイズに収まる最大のサイズが計算されます。\
+例えば、3840 * 1500の横長の動画を`--limit_direction xy`、`--mode fullhd`でリサイズする場合、リサイズ後の解像度は1920 * 750となります。`--limit_direction y`とした場合は、2764 * 1080のようになります。
+- `--mode divide`の場合、指定された倍率でリサイズされます。
+
+#### フレームレート
+- `--fps`で指定されたfpsを上限として、リサイズ後のfpsが計算されます。
+
+#### ビットレート
+- `--bpp`で指定されたbppを基に、ビットレートが計算されます。計算式は下記です。
+```
+bitrate = bpp * width * height * fps
+例: 0.036 (bpp) * 1920 (width) * 1080 (height) * 60 (fps) = 4,478,976 bps ~ 4.5 Mbps
+```
+こちらも同様、元ファイルより大きくならないように (大きくなれば元ファイルで上書きするよう) 設計しています。
+
+### 3. リサイズの実行
 - `subprocess`ライブラリでFFmpegを実行します。Windowsの場合、下記コマンドが実行されます。
 ```
 start /LOW /MIN ffmpeg -i "動画ファイル" -b:v "ビットレート" -c:v h264 -c:a copy -r fps -s 横ピクセルx縦ピクセル "出力先"
@@ -84,8 +104,8 @@ Windowsではない場合、`start /LOW /MIN`は省かれます。
 
 - また、Windowsで実行する場合に限り、動画ファイルのタイムスタンプをリサイズ後のファイルに引き継ぎます。
 
-### 3. リサイズ後ファイル (or コピーファイル) の保存
-下記のように格納されている動画ファイル (mp4, mov) を`input="./"`, `output="./output"`で再帰的にリサイズする場合、
+### 4. リサイズ後ファイル (or コピーファイル) の保存
+下記のように格納されている動画ファイル (mp4, mov) を`--input "./"`, `--output "./output"`で再帰的にリサイズする場合、
 ```
 parent_dir
 ├── video_resize.py
@@ -116,9 +136,8 @@ parent_dir
 ```
 
 > [!NOTE]
->プログラムでは、`--mode`や`--bitrate`、`--fps`オプション等に従い解像度、ビットレート、フレームレートを計算します。\
->このとき、リサイズ前後で全てのパラメータが同一となることがあります。\
->オプション`--nochange_copy`をtrueにしている場合、このような動画ファイルはリサイズせずにコピーされます。falseにしている場合、コピーは行われず、出力先フォルダに保存されません。
+>リサイズ処理後、元ファイルよりもかえって動画容量が大きくなることがあります。\
+>このような動画ファイルはリサイズ後、元動画によって上書きされます。
 
 ### 4. ログの出力
 プログラムと同じディレクトリ内にログファイルが生成されます。実行状況がコンソールに出力され、ログファイルにも記録されます。
