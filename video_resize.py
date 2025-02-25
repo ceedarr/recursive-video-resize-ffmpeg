@@ -1,8 +1,20 @@
 #!python3.11
+
+"""
+videoresize 4.1 変更点:
+  - 前バージョン（3.7）では --bitrate を用いていたが、4.1 では --bpp オプションを導入し、
+    ピクセル当たりのビット数からビットレートを計算する仕様に変更。
+  - 新たに set_bit_rate 関数を実装し、解像度と fps を元に計算したビットレートと元の
+    ビットレートを比較して決定するように変更。
+  - __init__()にconfigFromArgs()関数を追加。
+  - その他、処理ロジックはバージョン3.7と基本的に同様。
+"""
+
 import ffmpeg, time, os, shutil, sys, subprocess, datetime, logging
 from pathlib import Path
 import ctypes
 import ctypes.wintypes
+from typing import Any
 
 class VideoResize:
     """
@@ -31,128 +43,121 @@ class VideoResize:
         - --limit_direction, -l: リサイズ時に考慮する方向（"x", "y", "xy"）
         - --min_size, -s: リサイズ後の最小サイズ（幅, 高さ）
         - --fps, -f: fpsの上限
-        - --bitrate, -b: ビットレートの上限（bps）
+        - --bpp, -b: ピクセル当たりのビット数 bits per pixel
         - --nochange_copy, -nc: 変換不要の場合、ファイルをコピーするか（True) 否か（False）
 
     事前インストール：
-        - ffmpeg-python
-        - pandas
-        - pathlib
+        - FFmpeg: https://ffmpeg.org/download.html
 
     """
     def __init__(self, internal_argv=None) -> None:
-        try:  # .pyとして実行された場合
+        try: # .pyとして実行された場合
             this_file = Path(__file__)
-            user_argv = sys.argv[1:]
-        except NameError:  # Jupyter Notebook等の場合
+        except NameError: # Jupyter Notebook等の場合
             this_file = Path("__file__")
-            user_argv = internal_argv if internal_argv is not None else []
+        user_argv = sys.argv[1:] if internal_argv is None else internal_argv
         current_dir = this_file.parent
         os.chdir(current_dir)
         self.current_dir = current_dir
 
         # 初期設定（後でコマンドライン引数で上書き）
         config_dict = {
-            "input": Path("./"),           # 入力パス（ファイルまたはディレクトリ）
-            "output": Path("./output"),      # 出力ディレクトリ
-            "recursive": True,             # 再帰的に動画ファイルを検索するか
-            "mode": "3840box",             # "fullhd", "4k", "1920box", "3840box", "custom", "divide"
-            "custom_param": None,          # modeが"custom"なら (width, height)、"divide"なら倍率(float)
-            "limit_direction": "xy",       # リサイズ時に考慮する方向："x", "y", "xy"
-            "min_size": (1, 1),            # リサイズ後の最小サイズ（幅, 高さ）
-            "fps": 60,                   # fpsの上限
-            "bitrate": 4500000,            # ビットレートの上限（bps）
-            "nochange_copy": True         # 変換不要の場合、ファイルをコピーするか（True）否か（False）
+            "input"           : Path("./"),       # 入力パス（ファイルまたはディレクトリ）
+            "output"          : Path("./output"), # 出力ディレクトリ
+            "recursive"       : True,             # 再帰的に動画ファイルを検索するか
+            "mode"            : "3840box",        # "fullhd", "4k", "1920box", "3840box", "custom", "divide"
+            "custom_param"    : None,             # modeが"custom"なら (width, height)、"divide"なら倍率(float)
+            "limit_direction" : "xy",             # リサイズ時に考慮する方向："x", "y", "xy"
+            "min_size"        : (1, 1),           # リサイズ後の最小サイズ（幅, 高さ）
+            "fps"             : 60,               # fpsの上限
+            "bpp"             : 0.036,            # ピクセル当たりのビット数 bits per pixel
+            "nochange_copy"   : True              # 変換不要の場合、ファイルをコピーするか（True）否か（False）
         }
 
-        # コマンドライン引数による上書き（例：--input, --output, --mode, --min_size, --fps, --bitrate, --nochange_copy 等）
-        def add_index(index, increment=1):
-            return index + increment
-        idx = 0
-        while idx < len(user_argv):
-            cmd = user_argv[idx]
-            idx = add_index(idx)
-            if cmd in ("--input", "-i"):
-                path = Path(user_argv[idx])
-                idx = add_index(idx)
-                if path.exists():
-                    config_dict["input"] = path
+        # コマンドライン引数による上書き（例：--input, --output, --mode, --min_size, --fps, --bpp, --nochange_copy 等）
+        def configFromArgs(config_dict, user_argv):
+            def next_args(currentIdx:int, all_args:list|tuple|Any, argNum:int=1):
+                elems = all_args[currentIdx : currentIdx + argNum]
+                return currentIdx + argNum, elems
+            idx = 0
+            while idx < len(user_argv):
+                idx, [cmd] = next_args(idx, user_argv)
+                if cmd in ("--input", "-i"):
+                    idx, [path] = next_args(idx, user_argv)
+                    path = Path(path)
+                    if path.exists():
+                        config_dict["input"] = path
+                    else:
+                        raise FileNotFoundError(f"指定されたパス '{path}' は存在しません")
+                elif cmd in ("--output", "-o"):
+                    idx, [path] = next_args(idx, user_argv)
+                    path = Path(path)
+                    os.makedirs(path, exist_ok=True)
+                    config_dict["output"] = path
+                elif cmd in ("--recursive", "-r"):
+                    idx, [rec] = next_args(idx, user_argv)
+                    if rec.lower() == "true":
+                        config_dict["recursive"] = True
+                    elif rec.lower() == "false":
+                        config_dict["recursive"] = False
+                    else:
+                        raise ValueError(f"再帰処理の指定 '{rec}' は無効です")
+                elif cmd in ("--mode", "-m"):
+                    idx, [mode] = next_args(idx, user_argv)
+                    if mode.lower() in ("fullhd", "4k", "1920box", "3840box"):
+                        config_dict["mode"] = mode.lower()
+                    elif mode.lower() == "custom":
+                        idx, [w, h] = next_args(idx, user_argv, argNum=2)
+                        w, h = int(w), int(h)
+                        if w < 1 or h < 1:
+                            raise ValueError(f"カスタム解像度 '{(w, h)}' は自然数である必要があります")
+                        config_dict["mode"] = "custom"
+                        config_dict["custom_param"] = (w, h)
+                    elif mode.lower() == "divide":
+                        idx, [ratio] = next_args(idx, user_argv)
+                        ratio = float(ratio)
+                        if not 0 < ratio < 1:
+                            raise ValueError(f"倍率 '{ratio}' は有効な範囲 (0,1) にありません")
+                        config_dict["mode"] = "divide"
+                        config_dict["custom_param"] = ratio
+                    else:
+                        raise ValueError(f"モード '{mode}' は無効です")
+                elif cmd in ("--limit_direction", "-l"):
+                    idx, [direction] = next_args(idx, user_argv)
+                    if direction in ("x", "y", "xy"):
+                        config_dict["limit_direction"] = direction
+                    else:
+                        raise ValueError(f"制限方向 '{direction}' は無効です")
+                elif cmd in ("--min_size", "-s"):
+                    idx, [w_min, h_min] = next_args(idx, user_argv, argNum=2)
+                    w_min, h_min = int(w_min), int(h_min)
+                    if w_min < 1 or h_min < 1:
+                        raise ValueError(f"最小サイズ '{(w_min, h_min)}' は自然数である必要があります")
+                    config_dict["min_size"] = (w_min, h_min)
+                elif cmd in ("--fps", "-f"):
+                    idx, [fps] = next_args(idx, user_argv)
+                    fps = float(fps)
+                    if fps <= 0:
+                        raise ValueError(f"フレームレート '{fps}' は正の数である必要があります")
+                    config_dict["fps"] = fps
+                elif cmd in ("--bpp", "-b"):
+                    idx, [bpp] = next_args(idx, user_argv)
+                    bpp = float(bpp)
+                    if bpp <= 0:
+                        raise ValueError(f"bpp '{bpp}' は正の数である必要があります")
+                    config_dict["bpp"] = bpp
+                elif cmd in ("--nochange_copy", "-nc"):
+                    idx, [val] = next_args(idx, user_argv)
+                    if val.lower() in ("true", "yes", "1"):
+                        config_dict["nochange_copy"] = True
+                    elif val.lower() in ("false", "no", "0"):
+                        config_dict["nochange_copy"] = False
+                    else:
+                        raise ValueError(f"無効な値 '{val}' が--nochange_copyに指定されました")
                 else:
-                    raise FileNotFoundError(f"指定されたパス '{path}' は存在しません")
-            elif cmd in ("--output", "-o"):
-                path = Path(user_argv[idx])
-                idx = add_index(idx)
-                os.makedirs(path, exist_ok=True)
-                config_dict["output"] = path
-            elif cmd in ("--recursive", "-r"):
-                rec = user_argv[idx]
-                idx = add_index(idx)
-                if rec.lower() == "true":
-                    config_dict["recursive"] = True
-                elif rec.lower() == "false":
-                    config_dict["recursive"] = False
-                else:
-                    raise ValueError(f"再帰処理の指定 '{rec}' は無効です")
-            elif cmd in ("--mode", "-m"):
-                mode = user_argv[idx]
-                idx = add_index(idx)
-                if mode.lower() in ("fullhd", "4k", "1920box", "3840box"):
-                    config_dict["mode"] = mode.lower()
-                elif mode.lower() == "custom":
-                    w, h = user_argv[idx:idx+2]
-                    idx = add_index(idx, 2)
-                    w, h = int(w), int(h)
-                    if w < 1 or h < 1:
-                        raise ValueError(f"カスタム解像度 '{(w, h)}' は自然数である必要があります")
-                    config_dict["mode"] = "custom"
-                    config_dict["custom_param"] = (w, h)
-                elif mode.lower() == "divide":
-                    ratio = float(user_argv[idx])
-                    idx = add_index(idx)
-                    if not 0 < ratio < 1:
-                        raise ValueError(f"倍率 '{ratio}' は有効な範囲 (0,1) にありません")
-                    config_dict["mode"] = "divide"
-                    config_dict["custom_param"] = ratio
-                else:
-                    raise ValueError(f"モード '{mode}' は無効です")
-            elif cmd in ("--limit_direction", "-l"):
-                direction = user_argv[idx]
-                idx = add_index(idx)
-                if direction in ("x", "y", "xy"):
-                    config_dict["limit_direction"] = direction
-                else:
-                    raise ValueError(f"制限方向 '{direction}' は無効です")
-            elif cmd in ("--min_size", "-s"):
-                w_min, h_min = user_argv[idx:idx+2]
-                idx = add_index(idx, 2)
-                w_min, h_min = int(w_min), int(h_min)
-                if w_min < 1 or h_min < 1:
-                    raise ValueError(f"最小サイズ '{(w_min, h_min)}' は自然数である必要があります")
-                config_dict["min_size"] = (w_min, h_min)
-            elif cmd in ("--fps", "-f"):
-                fps = float(user_argv[idx])
-                idx = add_index(idx)
-                if fps <= 0:
-                    raise ValueError(f"フレームレート '{fps}' は正の数である必要があります")
-                config_dict["fps"] = fps
-            elif cmd in ("--bitrate", "-b"):
-                bitrate = int(user_argv[idx])
-                idx = add_index(idx)
-                if bitrate <= 0:
-                    raise ValueError(f"ビットレート '{bitrate}' は正の数である必要があります")
-                config_dict["bitrate"] = bitrate
-            elif cmd in ("--nochange_copy", "-nc"):
-                val = user_argv[idx]
-                idx = add_index(idx)
-                if val.lower() in ("true", "yes", "1"):
-                    config_dict["nochange_copy"] = True
-                elif val.lower() in ("false", "no", "0"):
-                    config_dict["nochange_copy"] = False
-                else:
-                    raise ValueError(f"無効な値 '{val}' が--nochange_copyに指定されました")
-            else:
-                raise ValueError(f"未知の引数 '{cmd}' が指定されました")
-        self.config_dict = config_dict
+                    raise ValueError(f"未知の引数 '{cmd}' が指定されました")
+            return config_dict
+        self.config_dict = configFromArgs(config_dict, user_argv)
 
         self.logger = None
         self.init_logger()
@@ -162,7 +167,7 @@ class VideoResize:
         self.logger = logging.getLogger("VideoResizeLogger")
         self.logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        log_filename = self.current_dir / f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        log_filename = self.current_dir / f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt" # ファイル名例：log_20220101_123456.txt
         fh = logging.FileHandler(log_filename, encoding="utf-8")
         fh.setLevel(logging.INFO)
         fh.setFormatter(formatter)
@@ -252,6 +257,8 @@ class VideoResize:
         recursive = config_dict["recursive"]
         output_dir = config_dict["output"]
 
+        exclude_ourput_flag = False # 出力先フォルダを処理対象から除外する旨の通知を繰り返し表示しないようにするフラグ
+
         video_pathls = []
         if input_dir.is_file():
             # 入力がファイルの場合は、そのファイルを対象にする
@@ -270,6 +277,9 @@ class VideoResize:
                     try:
                         # relative_to() が成功すれば current_path は output_dir の下にある
                         current_path.relative_to(output_dir_resolved)
+                        if not exclude_ourput_flag:
+                            self.logger.info(f"出力先フォルダ {output_dir} 内部のファイルを処理対象から除外します")
+                            exclude_ourput_flag = True # 一度だけ表示
                         continue
                     except ValueError:
                         # current_path は output_dir の外にあるので処理を続行
@@ -378,8 +388,21 @@ class VideoResize:
                 new_h += 1
             return (new_w, new_h)
 
-        def set_bit_rate(origin_bitrate, config_bitrate):
-            return config_bitrate if origin_bitrate > config_bitrate else origin_bitrate
+        def set_bit_rate(origin_bitrate, cfg_bpp, cfg_width, cfg_height, cfg_fps):
+            def bitrateFromBPP(bpp, width, height, fps):
+                """
+                BPP、解像度、フレームレートからビットレートを計算する関数
+                
+                :param bpp: Bits Per Pixel (float)
+                :param width: 動画の幅 (int)
+                :param height: 動画の高さ (int)
+                :param fps: フレームレート (float)
+                :return: ビットレート (Mbps)
+                """
+                bitrate = bpp * width * height * fps
+                return bitrate
+            calculated_bitrate = bitrateFromBPP(cfg_bpp, cfg_width, cfg_height, cfg_fps)
+            return calculated_bitrate if origin_bitrate > calculated_bitrate else origin_bitrate
 
         def set_fps(origin_fps, config_fps):
             return config_fps if origin_fps > config_fps else origin_fps
@@ -390,8 +413,8 @@ class VideoResize:
             orig_bitrate = info["bit_rate"]
             orig_fps = info["avg_frame_rate"]
             new_size = set_size(orig_size, config_dict["mode"], config_dict["custom_param"], config_dict["min_size"], config_dict["limit_direction"])
-            new_bitrate = set_bit_rate(orig_bitrate, config_dict["bitrate"])
             new_fps = set_fps(orig_fps, config_dict["fps"])
+            new_bitrate = set_bit_rate(orig_bitrate, config_dict["bpp"], new_size[0], new_size[1], new_fps)
             change_required = (new_size != orig_size) or (new_bitrate != orig_bitrate) or (new_fps != orig_fps)
             resize_param_dict[path] = {
                 "size": new_size,
@@ -413,7 +436,7 @@ class VideoResize:
         # 通常のファイル属性（アクセス・更新日時）のコピー
         shutil.copystat(src, dst)
 
-        # Windowsの場合、作成日時も明示的に設定する（Unix系OSでは不要または不可）
+        # Windowsの場合、作成日時も明示的に設定する（Unix系OSでは設定しない）
         if os.name == 'nt':
 
             kernel32 = ctypes.windll.kernel32
@@ -460,6 +483,18 @@ class VideoResize:
                 raise ctypes.WinError()
             kernel32.CloseHandle(handle)
 
+    def calculate_estimated_finish_time(self, processed_bytes, total_bytes, start_time):
+        # 容量当たりの処理時間から終了予定時刻を推定する
+        now = time.time()
+        elapsed_time = now - start_time # 経過時間 (s)
+        if elapsed_time == 0 or processed_bytes == 0:
+            return now
+        processBPS = processed_bytes / elapsed_time # 処理速度 (bytes/s)
+        remain_bytes = max(total_bytes - processed_bytes, 0) # 残り容量 (bytes)
+        # print(f"残り：{(total_bytes - processed_bytes)/(1024*1024):.2f} MB")
+        est_remain_time = remain_bytes / processBPS # 推定残り時間 (s)
+        return now + est_remain_time # 推定終了時間
+
     def resize(self):
         """
         各動画に対してリサイズ（または変換不要の場合のコピー）を実行する。
@@ -472,6 +507,10 @@ class VideoResize:
         os.makedirs(output_dir, exist_ok=True)
         resize_param_dict = self.resize_param_dict
 
+        # 動画全体の合計サイズ（バイト）を算出
+        total_bytes = sum(os.path.getsize(path) for path in resize_param_dict.keys())
+        processed_bytes = 0
+
         # OSに応じたffmpegコマンドのプレフィックス設定（Windowsの場合は start /LOW /MIN を利用）
         if os.name == 'nt':
             command_prefix = ["start", "/LOW", "/MIN"]
@@ -479,10 +518,9 @@ class VideoResize:
             command_prefix = []
 
         total_videos = len(resize_param_dict)
-        self.logger.info(f"{len(resize_param_dict)} 個の動画をリサイズします")
+        self.logger.info(f"{total_videos} 個の動画をリサイズします")
         resize_start_time = time.time()
 
-        # enumerateを利用して動画ごとの処理後に進捗と終了予測時刻を表示
         num_deletedVideos = 0
         for idx, (path, params) in enumerate(resize_param_dict.items()):
             # 出力ファイルは入力ディレクトリ構造を保持する
@@ -491,24 +529,36 @@ class VideoResize:
             output_path = output_dir / video_abs.relative_to(input_base)
             os.makedirs(output_path.parent, exist_ok=True)
 
-
             # 出力先に同名のファイルが既に存在する場合は処理をスキップする
             if output_path.exists():
                 self.logger.info(f"出力ファイルが既に存在するためスキップ: {output_path}")
                 num_deletedVideos += 1
+                total_bytes -= os.path.getsize(path)
+                processed_bytes += 0 # 処理済みバイト数に加算しない
+                # 終了時刻の推定
+                estimated_finish_time = self.calculate_estimated_finish_time(processed_bytes, total_bytes, resize_start_time)
+                finish_dt_str = datetime.datetime.fromtimestamp(estimated_finish_time).strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.info(f"動画 {idx+1}/{total_videos} 処理完了。終了予測時刻: {finish_dt_str}")
                 continue
 
             if not params["change_required"]:
                 self.logger.info(f"変換不要: {path}")
                 num_deletedVideos += 1
+                total_bytes -= os.path.getsize(path)
+                processed_bytes += 0 # 処理済みバイト数に加算しない
                 if config_dict["nochange_copy"]:
                     try:
                         shutil.copy2(path, output_path)
-                        self.logger.info(f"コピー実行（メタデータ引き継ぎ）: {path} -> {output_path}")
+                        self.logger.info(f"コピー実行（メタデータ引き継ぎ）: {output_path}")
                     except Exception as e:
-                        self.logger.error(f"コピー失敗: {path} -> {output_path}: {e}")
+                        self.logger.error(f"コピー失敗: {path}: {e}")
                 else:
                     self.logger.info(f"スキップ: {path}")
+                # 処理終了時間を予測
+                estimated_finish_time = self.calculate_estimated_finish_time(processed_bytes, total_bytes, resize_start_time)
+                finish_dt_str = datetime.datetime.fromtimestamp(estimated_finish_time).strftime('%Y-%m-%d %H:%M:%S')
+                self.logger.info(f"動画 {idx+1}/{total_videos} 処理完了。終了予測時刻: {finish_dt_str}")
+                continue
             else:
                 size = params["size"]
                 bit_rate = params["bit_rate"]
@@ -525,7 +575,7 @@ class VideoResize:
                     "-s", f"{size[0]}x{size[1]}",
                     str(output_path)
                 ]
-                self.logger.info(f"変換実行: {path} -> {output_path}")
+                self.logger.info(f"変換実行: {output_path}")
                 self.logger.debug(f"コマンド: {' '.join(command)}")
                 try:
                     result = subprocess.run(" ".join(command),
@@ -534,42 +584,42 @@ class VideoResize:
                                             shell=True,
                                             encoding="utf-8")
                     if result.returncode != 0:
-                        self.logger.error(f"ffmpegエラー: {path} -> {output_path}\n{result.stderr}")
+                        self.logger.error(f"ffmpegエラー: {path}\n{result.stderr}")
                         continue
                 except Exception as e:
-                    self.logger.error(f"ffmpeg実行失敗: {path} -> {output_path}: {e}")
+                    self.logger.error(f"ffmpeg実行失敗: {path}: {e}")
                     continue
 
-                # 変換後のファイルサイズチェックおよびメタデータ引き継ぎ部分の変更例
+                # 変換後のファイルサイズチェックおよびメタデータ引き継ぎ
                 try:
                     input_size = os.path.getsize(path)
                     output_size = os.path.getsize(output_path)
                     if output_size > input_size:
-                        self.logger.warning(f"変換後ファイルサイズが大きい: {path} (元: {input_size} bytes, 変換後: {output_size} bytes)")
+                        self.logger.warning(f"変換後ファイルサイズが大きい: {path} (元: {input_size/(1024*1024):.2f} MB, 変換後: {output_size/(1024*1024):.2f} MB)")
                         shutil.copy2(path, output_path)
-                        self.logger.info(f"元ファイルをコピー: {path} -> {output_path}")
+                        self.logger.info(f"元ファイルをコピー: {output_path}")
                     else:
                         try:
-                            # 従来の copystat() の代わりに copy_file_times() を使用
+                            # copy_file_times() でメタデータを引き継ぐ
                             self.copy_file_times(path, output_path)
-                            self.logger.info(f"メタデータ引き継ぎ: {path} -> {output_path}")
+                            self.logger.info(f"メタデータ引き継ぎ: {output_path}")
                         except Exception as e:
-                            self.logger.error(f"メタデータ引き継ぎ失敗: {path} -> {output_path}: {e}")
+                            self.logger.error(f"メタデータ引き継ぎ失敗: {output_path}: {e}")
                 except Exception as e:
-                    self.logger.error(f"ファイルサイズチェック失敗: {path} -> {output_path}: {e}")
+                    self.logger.error(f"ファイルサイズチェック失敗: {output_path}: {e}")
 
-            # 動画1本ごとの処理が完了した時点で、終了予測時刻を計算して表示
-            processed_count = idx + 1
-            # 変換不要の場合はカウントしない
-            processed_count_for_calculation = processed_count - num_deletedVideos
-            total_videos_for_calculation = total_videos - num_deletedVideos
-            elapsed_time = time.time() - resize_start_time
-            avg_time_per_video = elapsed_time / processed_count_for_calculation
-            estimated_total_time = avg_time_per_video * total_videos_for_calculation
-            estimated_finish_time = resize_start_time + estimated_total_time
+            # 処理終了時間を予測
+            processed_bytes += os.path.getsize(path)
+            estimated_finish_time = self.calculate_estimated_finish_time(processed_bytes, total_bytes, resize_start_time)
             finish_dt_str = datetime.datetime.fromtimestamp(estimated_finish_time).strftime('%Y-%m-%d %H:%M:%S')
-            self.logger.info(f"動画 {processed_count}/{total_videos} 処理完了。終了予測時刻: {finish_dt_str}")
+            self.logger.info(f"動画 {idx+1}/{total_videos} 処理完了。終了予測時刻: {finish_dt_str}")
 
+        self.logger.info("すべての動画のリサイズ処理が完了しました。")
+        self.logger.info(f"合計処理済みバイト数: {processed_bytes/(1024*1024):.2f} MB")
+        self.logger.info(f"合計対象バイト数: {total_bytes/(1024*1024):.2f} MB")
+        self.logger.info(f"処理済み動画数: {total_videos - num_deletedVideos} / {total_videos} ")
+        if num_deletedVideos > 0:
+            self.logger.info(f"スキップした動画数: {num_deletedVideos} ")
 
     def run(self):
         start_time = time.time()
