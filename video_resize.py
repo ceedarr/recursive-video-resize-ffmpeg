@@ -10,7 +10,7 @@ videoresize 4.1 変更点:
   - その他、処理ロジックはバージョン3.7と基本的に同様。
 """
 
-import ffmpeg, time, os, shutil, sys, subprocess, datetime, logging
+import ffmpeg, time, os, shutil, sys, subprocess, datetime, logging, shlex
 from pathlib import Path
 import ctypes
 import ctypes.wintypes
@@ -59,6 +59,7 @@ class VideoResize:
         current_dir = this_file.parent
         os.chdir(current_dir)
         self.current_dir = current_dir
+        self.executed_command = self.build_executed_command(this_file, user_argv)
 
         # 初期設定（後でコマンドライン引数で上書き）
         config_dict = {
@@ -162,6 +163,13 @@ class VideoResize:
         self.logger = None
         self.init_logger()
 
+    def build_executed_command(self, this_file: Path, user_argv: list[str]) -> str:
+        """ログ用に実行コマンド文字列を構築する。"""
+        cmd_parts = [sys.executable, str(this_file)] + list(user_argv)
+        if os.name == "nt":
+            return subprocess.list2cmdline(cmd_parts)
+        return shlex.join(cmd_parts)
+
     def init_logger(self):
         """ログの初期化（コンソール出力＋ファイル出力）"""
         self.logger = logging.getLogger("VideoResizeLogger")
@@ -176,6 +184,7 @@ class VideoResize:
         sh.setLevel(logging.INFO)
         sh.setFormatter(formatter)
         self.logger.addHandler(sh)
+        self.logger.info(f"実行コマンド: {self.executed_command}")
         self.logger.info("Logger initialized.")
 
     def normalize_filename(self, name: str) -> str:
